@@ -3,35 +3,45 @@ require "logstash/outputs/base"
 require "logstash/namespace"
 require "logstash/json"
 
-class LogStash::Outputs::Http < LogStash::Outputs::Base
-  # This output lets you `PUT` or `POST` events to a
-  # generic HTTP(S) endpoint
+class LogStash::Outputs::Sumologic < LogStash::Outputs::Base
+  # Got a Sumologic account? This output lets you `POST` events to your Sumologic. 
   #
-  # Additionally, you are given the option to customize
-  # the headers sent as well as basic customization of the
-  # event json itself.
 
-  config_name "http"
+  config_name "sumologic"
 
-  # URL to use
+  # The hostname to send logs to. This should target the sumologic http input
+  # server which is usually "collectors.sumologic.com"
+  config :host, :validate => :string, :default => "collectors.sumologic.com"
+
+  # The path to use to to send logs to. 
+  config :path, :validate => :string, :default => "/receiver/v1/http/"
+
+  # The sumologic http input key to send to.
+  # This is visible in the Sumologic hosted http source page as something like this:
+  # ....
+  #     https://collectors.sumologic.com/receiver/v1/http/8TU2xK1CFVu8UT.....jhScYADl8U_SqmiyD2tA==
+  #                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  #                                                       \---------->     key      <-------------/
+  # ....
+  # You can use `%{foo}` field lookups here if you need to pull the api key from
+  # the event. This is mainly aimed at multitenant hosting providers who want
+  # to offer shipping a customer's logs to that customer's loggly account.
+  config :key, :validate => :string, :required => true
+ 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
+ # URL to use
   config :url, :validate => :string, :required => :true
-
-  # validate SSL?
-  config :verify_ssl, :validate => :boolean, :default => true
 
   # What verb to use
   # only put and post are supported for now
-  config :http_method, :validate => ["put", "post"], :required => :true
-
-  # Custom headers to use
-  # format is `headers => ["X-My-Header", "%{host}"]`
-  config :headers, :validate => :hash
+  config :http_method, :validate => ["post"], :required => :true
 
   # Content type
   #
   # If not specified, this defaults to the following:
   #
   # * if format is "json", "application/json"
+  # * if format is "message", "text/plain"
   # * if format is "form", "application/x-www-form-urlencoded"
   config :content_type, :validate => :string
 
@@ -55,25 +65,23 @@ class LogStash::Outputs::Http < LogStash::Outputs::Base
 
   config :message, :validate => :string
 
+
   public
   def register
     require "ftw"
     require "uri"
     @agent = FTW::Agent.new
-    # TODO(sissel): SSL verify mode?
 
     if @content_type.nil?
       case @format
         when "form" ; @content_type = "application/x-www-form-urlencoded"
         when "json" ; @content_type = "application/json"
+        when "message" ; @content_type = "text/plain"
       end
     end
     if @format == "message"
       if @message.nil?
         raise "message must be set if message format is used"
-      end
-      if @content_type.nil?
-        raise "content_type must be set if message format is used"
       end
       unless @mapping.nil?
         @logger.warn "mapping is not supported and will be ignored if message format is used"
@@ -84,7 +92,13 @@ class LogStash::Outputs::Http < LogStash::Outputs::Base
   public
   def receive(event)
     return unless output?(event)
-
+ 
+    if event == LogStash::SHUTDOWN
+      finished
+      return
+    end
+	
+	
     if @mapping
       evt = Hash.new
       @mapping.each do |k,v|
@@ -93,22 +107,14 @@ class LogStash::Outputs::Http < LogStash::Outputs::Base
     else
       evt = event.to_hash
     end
+	
+	# Send the event over https.
+    url = URI.parse("https://#{@host}#{@path}#{event.sprintf(@key)}")
+    @logger.info("Sumologic URL", :url => url)
+	
+    request = @agent.post(event.sprintf(@url))
 
-    case @http_method
-    when "put"
-      request = @agent.put(event.sprintf(@url))
-    when "post"
-      request = @agent.post(event.sprintf(@url))
-    else
-      @logger.error("Unknown verb:", :verb => @http_method)
-    end
-
-    if @headers
-      @headers.each do |k,v|
-        request.headers[k] = event.sprintf(v)
-      end
-    end
-
+ 
     request["Content-Type"] = @content_type
 
     begin
